@@ -1,27 +1,42 @@
 # C4D → Spout: Research & Build Plan
 
-**Goal:** when the scene changes, render the active camera, a Redshift **spherical
-lat-long** camera, at a **fixed 2:1 resolution** (e.g. 2048×1024), and publish the frame as a
-Spout sender. UE5 receives it and maps it onto sphere geometry for fast review.
+**Goal:** publish the active camera, a Redshift **Spherical** camera, as a lat-long image at
+a **fixed 2:1 resolution** (e.g. 2048×1024) through Spout. UE5 receives it and maps it onto
+sphere geometry for fast review.
 
-- Update model: re-render on scene change. Continuous frame rate is not required.
+- Update model: on scene change. Continuous frame rate is not required.
 - Target: Cinema 4D 2026.x (2026.3 is current) with Redshift, on Windows 10/11 x64. Spout is
   Windows-only.
 
 ---
 
-## 1. Why this can't be a viewport grab
+## 1. Key fact: the viewport already draws the spherical projection
 
-- The C4D viewport draws with a perspective projection. It **cannot display a spherical
-  lat-long projection**. Only Redshift renders that camera type.
-- `BaseDraw::GetViewportImage` returns whatever size the viewport happens to be, with the
-  HUD, grid and overlays included. It doesn't give a fixed 2:1 output.
-- Redshift's interactive render (the RenderView IPR, or the IPR shown in the viewport) has
-  **no public SDK access to its frame buffer**.
+With a Redshift Camera set to **Projection → Type: Spherical** as the scene camera, the
+standard C4D hardware viewport draws the 360° lat-long projection itself. No Redshift render
+or IPR is involved. That means we can use the fast viewport pipeline instead of a full
+Redshift render.
 
-**So the plugin drives Redshift renders itself:** `RenderDocument()` with Redshift at the
-fixed resolution. It's triggered on scene change, debounced, and a newer change cancels an
-older render.
+The remaining problem is getting **fixed-size** output. The on-screen viewport has whatever
+size the window gives it, plus HUD, grid and overlays. There are three ways to get the
+pixels, in order of preference:
+
+| # | Method | Fixed size? | Speed | Notes |
+|---|---|---|---|---|
+| **A** | `RenderDocument()` with the **Viewport Renderer** (`RDATA_RENDERENGINE_PREVIEWHARDWARE`) at 2048×1024 | ✅ exact | fast (hardware viewport, offscreen) | Clean output with no HUD or grid, and viewport display settings come from the render setting. **Unverified: whether the Viewport Renderer honours the RS Spherical projection the way the interactive viewport does.** Phase 1 test #1. |
+| B | `BaseDraw::GetViewportImage()` of the live viewport, cropped to the safe-frame rect (`bd->GetSafeFrame`) and resampled to 2048×1024 | ≈ (resampled) | fastest (already drawn) | Quality depends on the viewport's on-screen size. HUD and grid must be turned off in that view's filter. Fallback if A doesn't do spherical. |
+| C | `RenderDocument()` with **Redshift** at 2048×1024 | ✅ exact | slowest (full scene translation per render) | Final-quality lighting. Offered as a "quality" mode, not the default. |
+
+Methods A and C share the same code path; only the render engine differs. So the plugin gets
+a **Render engine: Viewport / Redshift** option almost for free. B is a separate capture path
+that gets built only if A fails.
+
+**Viewport caveat to check:** a real-time viewport can only bend geometry at the vertices, if
+that's how it implements the spherical projection. Large polygons, such as a big ground plane
+or long walls, may then show straight edges where the true projection curves. Compare against
+a Redshift render in Phase 1.
+
+---
 
 ## 2. Research findings
 
@@ -30,103 +45,82 @@ older render.
   with C4D and on developers.maxon.net. The `Maxon-Computer` GitHub repos contain only
   examples.
 - **`RenderDocument(doc, settings, progressHook, …, bmp, flags, BaseThread* th)`.** From the
-  SDK's own `examples_ocio.cpp`: "RenderDocument itself is not inherently main thread bound".
-  It blocks the calling thread while the render runs on a dedicated render thread. The `th`
-  argument lets a caller's thread cancel the render.
-- **Colour (important in 2026):** new documents are OCIO by default. The SDK example:
-  - renders into a `MultipassBitmap` with `COLORMODE::RGBf`
-  - sets `RDATA_BAKE_OCIO_VIEW_TRANSFORM_RENDER = false`, which keeps linear render-space data
-  - calls `BakeOcioViewToBitmap(bmp, settings, savebit)` to get display-referred pixels
-
-  We do the same, and get output that matches what the user sees in Redshift.
-- **Scene-change events:** `MessageData::CoreMessage` receives `EVMSG_CHANGE`.
-  `MessageData::GetTimer` provides a debounce tick. `bd->GetSceneCamera(doc)` gives the active
+  SDK's `examples_ocio.cpp`: "RenderDocument itself is not inherently main thread bound".
+  It blocks the caller, and `th` allows cancellation. The SDK's material-preview example uses
+  `RDATA_RENDERENGINE_PREVIEWHARDWARE` through the same call, which confirms Viewport Renderer
+  rendering from code.
+- **Colour (2026 OCIO default):** render into a `MultipassBitmap` with `COLORMODE::RGBf` and
+  `RDATA_BAKE_OCIO_VIEW_TRANSFORM_RENDER = false`. Then
+  `BakeOcioViewToBitmap(bmp, settings, savebit)` produces display-referred pixels. This is
+  per the SDK example.
+- **`BaseDraw::GetViewportImage(maxon::ImageRef&)`** reads the viewport colour buffer. It's
+  C++ only and read-only, and it's only needed for method B.
+- **Change detection:** `MessageData::CoreMessage` receives `EVMSG_CHANGE`.
+  `MessageData::GetTimer` provides the debounce. `bd->GetSceneCamera(doc)` gives the active
   camera.
-- **Threading rules:** clone the document on the main thread
-  (`doc->GetClone(COPYFLAGS::DOCUMENT)`), then render the clone on a worker thread. Never touch
-  the live document off the main thread.
-
-### Redshift
-- Spherical output comes from the Redshift camera settings: Type **Spherical**, projection
-  **Latitude-Longitude**, 360°×180° FOV. Rendered through RenderDocument, it produces a proper
-  equirectangular image.
-- **Render settings strategy:** don't hard-code Redshift parameter IDs. The user creates a
-  render setting in the scene, e.g. **"Spout Preview"**, with the Redshift renderer, low
-  samples and the denoiser. The plugin renders with that `RenderData` and overrides only the
-  resolution. Quality and speed stay under the user's control, with no Redshift API coupling.
-- **Latency is the main unknown.** Each RenderDocument call re-translates the whole scene.
-  There's no incremental update like the IPR has. The first render also pays the Redshift GPU
-  init cost. It needs measuring (see Phase 1).
-- Licensing: RenderDocument with Redshift GPU needs a Redshift GPU licence, just as a normal
-  render would.
+- **Threading:** clone the document on the main thread (`GetClone(COPYFLAGS::DOCUMENT)`) and
+  render the clone on a worker. Open question: whether the Viewport Renderer has to run on the
+  main thread, since it uses the GPU context. Phase 1 test #3.
 
 ### Spout 2 (leadedge/Spout2, v2.007.017, BSD-2-Clause)
-- **SpoutDX** creates its own D3D11 device (`OpenDirectX11()`).
-  `SendImage(pixels, w, h, pitch)` uploads a CPU buffer to the shared texture.
-- It supports `SetSenderFormat()`: `DXGI_FORMAT_R8G8B8A8_UNORM` for display-referred 8-bit, or
-  `R16G16B16A16_FLOAT` for linear HDR if UE should handle the colour.
-- Not thread-safe, so one thread owns it. Senders don't need a steady frame rate: receivers
-  keep the last frame, which suits "update on change".
-- Sources needed: `SpoutDX.cpp/.h` plus these from `SPOUTSDK/SpoutGL/`: `SpoutDirectX`,
+- **SpoutDX** creates its own D3D11 device, and `SendImage(pixels, w, h, pitch)` uploads a CPU
+  buffer. `SetSenderFormat()` picks `R8G8B8A8_UNORM` (display-referred) or
+  `R16G16B16A16_FLOAT` (linear).
+- Not thread-safe, so one thread owns it. Receivers keep the last frame, which fits updating
+  on change.
+- Sources: `SpoutDX.cpp/.h` plus these from `SPOUTSDK/SpoutGL/`: `SpoutDirectX`,
   `SpoutSenderNames`, `SpoutFrameCount`, `SpoutCopy`, `SpoutUtils`, `SpoutSharedMemory`,
   `SpoutCommon.h`. Link `d3d11.lib`, `dxgi.lib`.
 
-### UE5 side (outside this repo, noted for completeness)
-- Use a UE5 Spout receiver plugin, e.g. the Off World Live toolkit or an open-source Spout2
-  UE plugin. It writes to a Render Target.
-- Use an unlit material with the Render Target on the sphere. If you view from inside, check
-  the U flip / inward normals and the seam orientation. Equirect U=0 in Redshift vs the
-  sphere's UV seam may need a 90° or 180° offset.
-- UE doesn't need a matching 2:1 texture size; any power-of-two-ish 2:1 works.
+### UE5 side (outside this repo)
+- Use a Spout receiver plugin (e.g. the Off World Live toolkit or an open-source Spout2 UE
+  plugin) that writes to a Render Target. Apply it with an unlit material on the sphere.
+- Expect to align the seam and U direction: Redshift's equirect U=0 vs the sphere's UV seam,
+  and a flip if viewed from inside.
 
 ---
 
 ## 3. Architecture
 
 ```
-Main thread (MessageData)                         Render worker (C4DThread)          Spout thread
-─────────────────────────                         ─────────────────────────          ────────────
+Main thread (MessageData)                        Render worker                        Spout thread
+─────────────────────────                        ─────────────                        ────────────
 EVMSG_CHANGE → mark dirty, restart debounce
-Timer tick (debounce elapsed, e.g. 250 ms):
-  if render running → request cancel (th)
-  clone doc; set camera = bd->GetSceneCamera()
-  pick "Spout Preview" RenderData, set XRES/YRES
-  hand clone to worker ────────────────────────▶  RenderDocument(clone, rd, …, bmp, th)
-                                                  if cancelled → drop
-                                                  BakeOcioViewToBitmap → RGBA8/16F
-                                                  flip rows if needed
-                                                  push latest frame ──────────────▶ SendImage()
-                                                  free clone                        (sender kept
-                                                                                     alive between
-                                                                                     frames)
+Timer tick (debounce elapsed, ~150 ms):
+  if render running → mark stale / cancel
+  clone doc; camera = bd->GetSceneCamera()
+  settings = "Spout Preview" RenderData copy
+    XRES/YRES = 2048×1024, engine = Viewport|RS
+  dispatch ─────────────────────────────────────▶ RenderDocument(clone, …, bmp, th)
+                                                  BakeOcioViewToBitmap → RGBA8
+                                                  push latest ──────────────────────▶ SendImage()
 ```
 
-- **Latest wins:** at most one render runs at a time. Changes that arrive during a render
-  mark it stale. It gets cancelled via `th`, or finished and immediately followed by a
-  re-render, depending on which proves faster in Phase 1.
-- **Change filtering:** `EVMSG_CHANGE` also fires on selection and UI changes. Start by
-  accepting all changes, plus the debounce. Refine later if it re-renders too often, e.g. by
-  comparing `doc->GetDirty(DIRTYFLAGS::DATA | DIRTYFLAGS::MATRIX)` and the camera matrix.
-- **No live-document mutation:** all overrides apply to the clone and a copy of the render
-  settings.
+If Phase 1 shows the Viewport Renderer must run on the main thread, the render happens
+directly in the timer tick. At 2K this should take milliseconds to tens of milliseconds, so
+it's acceptable. Redshift mode stays on the worker.
+
+- **Latest wins:** at most one render in flight. A change during a render triggers one
+  follow-up render.
+- **Render settings:** the user creates a **"Spout Preview"** render setting in the scene.
+  It controls viewport display options (lines off, textures on, etc.) or Redshift sample
+  settings. The plugin overrides only the resolution and, optionally, the engine. No Redshift
+  parameter IDs are hard-coded.
+- **No live-document mutation:** all changes apply to the clone or a copy of the settings.
 
 ### Plugin components
 | Class | Type | Role |
 |---|---|---|
-| `SpoutPreviewMessage` | `MessageData` | Listens for changes, debounces on a timer, clones the doc and dispatches renders |
-| `RenderWorker` | `C4DThread` | Runs RenderDocument, the OCIO bake and pixel conversion |
-| `SpoutSenderThread` | `C4DThread` / `std::thread` | Owns SpoutDX; sends the latest frame |
-| `SpoutPreviewCommand` + `SpoutPreviewDialog` | `CommandData` + `GeDialog` | UI (below) |
-| `main.cpp` | — | Registration. On `C4DPL_ENDACTIVITY`: cancel the render, join threads, release the sender |
+| `SpoutPreviewMessage` | `MessageData` | Change detection, debounce, clone and dispatch |
+| `RenderWorker` | `C4DThread` | RenderDocument, OCIO bake, RGBA8 conversion |
+| `SpoutSenderThread` | `C4DThread` | Owns SpoutDX; sends the latest frame |
+| `SpoutPreviewCommand` + dialog | `CommandData` + `GeDialog` | UI |
+| `main.cpp` | — | Registration. On `C4DPL_ENDACTIVITY`: cancel, join threads, release the sender |
 
-**Dialog:** Enable toggle · Sender name (default `C4D_LatLong`) · Resolution preset
-(1024×512 / 2048×1024 / 4096×2048 / custom, locked 2:1 by default) · Render setting picker
-(default: one named "Spout Preview", else active) · Output: 8-bit display (view transform
-baked) or 16-bit float linear · Debounce ms · "Render now" button · Status: last render time
-and state (idle / rendering / cancelled / error).
-
-Settings persist in the world plugin container. Optionally they can also live in the
-document, per scene.
+**Dialog:** Enable · Sender name (`C4D_LatLong`) · Resolution (1024×512 / 2048×1024 /
+4096×2048 / custom, 2:1 locked) · Engine (Viewport / Redshift) · Render setting picker
+(default "Spout Preview") · Output 8-bit display / 16F linear · Debounce ms · Render now ·
+Status (last render ms, state).
 
 ---
 
@@ -134,44 +128,40 @@ document, per scene.
 
 ### Phase 0 – Environment (½ day)
 C4D 2026.3 + Redshift, VS 2022, CMake, and the C4D C++ SDK. Build `example.hello_world` and
-confirm it loads. Register 2 plugin IDs on developers.maxon.net. Add Spout2 as a git
-submodule, pinned to a tag. Install the SpoutReceiver demo and a UE5 Spout receiver.
+confirm it loads. Register 2 plugin IDs. Add Spout2 as a pinned submodule. Install the
+SpoutReceiver demo and a UE5 Spout receiver.
 
-### Phase 1 – Latency spike (1 day) — **decides whether the approach is fast enough**
-Use a quick **Python** script in the Script Manager. It needs no build, because
-`c4d.documents.RenderDocument` is available there. Render the active spherical camera with
-the "Spout Preview" settings at 1024×512, 2048×1024 and 4096×2048, and measure:
-- first render vs subsequent renders (Redshift init cost)
-- scene translation time vs render time, on light and heavy test scenes
-- the effect of samples and denoiser on time
-- that the output is correct equirect, and that colours match after the OCIO bake
+### Phase 1 – Python spike (1 day, no build needed)
+Run `prototype/spike.py` in the Script Manager against a scene like `Camping.c4d`:
+1. **The deciding test:** `RenderDocument` with the Viewport Renderer at 2048×1024 using the
+   RS Spherical camera. Does the output show the spherical projection, or a plain perspective
+   view?
+2. Timing at 1K/2K/4K: Viewport Renderer vs Redshift, and first render vs subsequent renders.
+3. Whether the Viewport Renderer works from a `C4DThread` or needs the main thread.
+4. Colours after the OCIO bake vs the viewport. Large-polygon straight-edge artifacts vs the
+   Redshift render.
 
-Targets: under 1 s at 2048×1024 for a typical review scene. If the times are far worse, the
-alternatives are lower preview resolution, fewer samples, disabling GI in the preview
-setting, or accepting the latency.
+Outcome: choose between A and B as the default path.
 
 ### Phase 2 – MVP C++ plugin (2–3 days)
-1. CMake module with the Spout sources and `d3d11`/`dxgi` linked. Keep Spout out of C4D's
-   stylecheck, e.g. as a separate static lib target.
-2. `SpoutSenderThread` and a "send test pattern" command. Verify in the SpoutReceiver demo
-   and in UE5.
-3. `RenderWorker`: clone, RenderDocument, OCIO bake, RGBA8, send. Triggered by a "Render now"
-   command.
-4. Verify in UE: orientation, seam, colours, and 2:1 mapping on the sphere.
+1. CMake module with the Spout sources (as a separate static lib target, outside the C4D
+   stylecheck) and `d3d11`/`dxgi` linked.
+2. `SpoutSenderThread` + a test-pattern command. Verify in SpoutReceiver and UE5.
+3. Render path from Phase 1 + OCIO bake + send, via "Render now". Verify orientation, seam and
+   colour on the UE sphere.
 
 ### Phase 3 – Auto-update on change (1–2 days)
-`MessageData` with EVMSG_CHANGE, debounce, latest-wins, and cancellation. Test while dragging
-objects and orbiting the camera, switching documents, closing C4D mid-render, and running a
-normal Picture Viewer render at the same time (see risks).
+`MessageData` with EVMSG_CHANGE, debounce and latest-wins. Test by dragging objects, orbiting
+the camera, switching documents, closing C4D mid-render, and running user renders at the same
+time.
 
 ### Phase 4 – UI & polish (1–2 days)
-Dialog, persistence, the 16-bit float linear option, the status line, and error reporting:
-no camera, non-Redshift render setting, render failure.
+Dialog, persistence, the Redshift engine option, 16F output, status and errors (no camera,
+camera not spherical, render failure).
 
 ### Phase 5 – Packaging
-Release `.xdl64` + `res/` as a zip. README covering install, how to set up the "Spout
-Preview" render setting and the Redshift spherical camera, the UE5 material setup, and the
-Spout BSD-2 notice. CI is unlikely, because the C4D SDK isn't redistributable.
+`.xdl64` + `res/` zip. README covering install, how to set up the "Spout Preview" render
+setting, the UE5 material setup, and the Spout BSD-2 notice.
 
 ---
 
@@ -182,37 +172,34 @@ C4D_To_Spout/
   PLAN.md
   README.md
   external/Spout2/                 (submodule)
-  prototype/render_latency.py      (Phase 1 spike)
+  prototype/spike.py               (Phase 1)
   plugin/c4d_to_spout/
     project/projectdefinition.txt
-    res/                           (c4d_symbols.h, dialogs, strings_us)
+    res/
     source/
       main.cpp
-      preview_message.cpp/.h       (MessageData: change detection + dispatch)
-      render_worker.cpp/.h         (RenderDocument + OCIO bake + conversion)
-      spout_sender_thread.cpp/.h   (SpoutDX owner)
-      preview_command.cpp/.h       (CommandData + GeDialog)
+      preview_message.cpp/.h
+      render_worker.cpp/.h
+      spout_sender_thread.cpp/.h
+      preview_command.cpp/.h
 ```
 
 ## 6. Risks & open questions
-1. **Redshift RenderDocument latency.** A full scene translation happens on every change;
-   Phase 1 measures it. This is the main risk to "fast review".
-2. **Concurrent renders.** A background Redshift render may conflict with a user-started
-   Picture Viewer render or the IPR on the same GPU. Test this, and optionally auto-pause
-   while other renders run.
-3. **Cancellation.** How quickly Redshift honours `BaseThread` cancellation. If it's slow, use
-   "finish, then re-render latest" instead.
-4. **Colour.** Choose between 8-bit display-referred (simple; UE shows it as-is on an unlit
-   material) and 16F linear (correct if UE applies its own tonemapping). Default to 8-bit.
-5. **Clone cost.** Cloning large documents on the main thread causes a UI hitch each time.
-   The debounce limits how often; measure it on heavy scenes.
+1. **Whether the Viewport Renderer supports RS Spherical.** If not, fall back to B (grab the
+   live viewport and resample), which is proven to show spherical but depends on window size.
+2. **Viewport projection accuracy.** Large polygons may render with straight edges. Compare
+   with Redshift; mitigate by subdividing big surfaces or switching to Redshift mode.
+3. **Viewport Renderer threading.** It may need the main thread; fine at preview resolutions.
+4. **Redshift mode latency.** Each render re-translates the whole scene, which is acceptable
+   for occasional "quality" updates.
+5. **Clone cost on heavy scenes.** It causes a main-thread hitch per update; the debounce
+   limits it.
 6. **Not verified from here.** developers.maxon.net was unreachable from this environment.
-   Confirm the RenderDocument/OCIO details against the 2026.3 docs. They came from the SDK's
-   own example code on GitHub.
+   Confirm the API details against the 2026.3 docs. The RenderDocument/OCIO details come from
+   the SDK's example code on GitHub.
 
 ## 7. References
-- Spout: https://spout.zeal.co/ · SDK: https://github.com/leadedge/Spout2 (`SPOUTSDK/SpoutDirectX/SpoutDX`)
+- Spout: https://spout.zeal.co/ · SDK: https://github.com/leadedge/Spout2
 - C4D C++ SDK docs: https://developers.maxon.net/docs/cpp/ · 2026.3 SDK release: https://developers.maxon.net/forum/topic/16419/maxon-cinema-4d-2026.3-sdk-release
-- CMake migration: https://developers.maxon.net/docs/cpp/2026_1_0/manual_migrating_to_2026.html
-- RenderDocument + OCIO example: https://github.com/Maxon-Computer/Cinema-4D-Cpp-API-Examples (`plugins/example.image/source/examples_ocio.cpp`)
-- Viewport capture limits: https://developers.maxon.net/topic/14684/stream-the-viewport-to-python-api-that-sends-an-image-back-and-use-that-as-a-texture
+- RenderDocument + OCIO example: https://github.com/Maxon-Computer/Cinema-4D-Cpp-API-Examples (`plugins/example.image/source/examples_ocio.cpp`; Viewport Renderer usage in `plugins/example.main/source/shader/simplematerial.cpp`)
+- GetViewportImage: https://developers.maxon.net/topic/14684/stream-the-viewport-to-python-api-that-sends-an-image-back-and-use-that-as-a-texture
