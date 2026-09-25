@@ -17,6 +17,19 @@ standard C4D hardware viewport draws the 360° lat-long projection itself. No Re
 or IPR is involved. That means we can use the fast viewport pipeline instead of a full
 Redshift render.
 
+**Aspect rule: output = camera frame, never the viewport.** In C4D the camera frame's aspect
+comes from the render settings: `RDATA_XRES`/`RDATA_YRES`, `RDATA_FILMASPECT` and
+`RDATA_PIXELASPECT`. The viewport shows that frame letterboxed, which is the darkened safe-frame
+bands. The plugin therefore:
+- reads the aspect from the active or "Spout Preview" render setting, and never imposes its
+  own. The user picks only the output width, and height = width / film aspect. The default is
+  the render setting's exact XRES×YRES.
+- warns when a Spherical camera is active but the aspect isn't 2:1, since that would stretch
+  the lat-long
+- in method B, crops the grabbed viewport to `bd->GetSafeFrame(&l, &t, &r, &b)` before
+  resampling. This discards the letterbox bands and must account for the DPI scale if the
+  grabbed image is in device pixels.
+
 The remaining problem is getting **fixed-size** output. The on-screen viewport has whatever
 size the window gives it, plus HUD, grid and overlays. There are three ways to get the
 pixels, in order of preference:
@@ -90,7 +103,8 @@ Timer tick (debounce elapsed, ~150 ms):
   if render running → mark stale / cancel
   clone doc; camera = bd->GetSceneCamera()
   settings = "Spout Preview" RenderData copy
-    XRES/YRES = 2048×1024, engine = Viewport|RS
+    XRES = user width, YRES = width / film aspect
+    engine = Viewport|RS
   dispatch ─────────────────────────────────────▶ RenderDocument(clone, …, bmp, th)
                                                   BakeOcioViewToBitmap → RGBA8
                                                   push latest ──────────────────────▶ SendImage()
@@ -117,8 +131,9 @@ it's acceptable. Redshift mode stays on the worker.
 | `SpoutPreviewCommand` + dialog | `CommandData` + `GeDialog` | UI |
 | `main.cpp` | — | Registration. On `C4DPL_ENDACTIVITY`: cancel, join threads, release the sender |
 
-**Dialog:** Enable · Sender name (`C4D_LatLong`) · Resolution (1024×512 / 2048×1024 /
-4096×2048 / custom, 2:1 locked) · Engine (Viewport / Redshift) · Render setting picker
+**Dialog:** Enable · Sender name (`C4D_LatLong`) · Output width (default: render setting
+XRES; height follows the camera/film aspect, shown read-only with a warning if it's not 2:1
+for a spherical camera) · Engine (Viewport / Redshift) · Render setting picker
 (default "Spout Preview") · Output 8-bit display / 16F linear · Debounce ms · Render now ·
 Status (last render ms, state).
 
@@ -138,7 +153,10 @@ Run `prototype/spike.py` in the Script Manager against a scene like `Camping.c4d
    view?
 2. Timing at 1K/2K/4K: Viewport Renderer vs Redshift, and first render vs subsequent renders.
 3. Whether the Viewport Renderer works from a `C4DThread` or needs the main thread.
-4. Colours after the OCIO bake vs the viewport. Large-polygon straight-edge artifacts vs the
+4. Aspect: confirm the output matches the safe frame (letterbox excluded) and that the
+   lat-long spans the full 360°×180° edge to edge. For B, confirm that `GetSafeFrame`
+   coordinates line up with the `GetViewportImage` pixels, including under DPI scaling.
+5. Colours after the OCIO bake vs the viewport. Large-polygon straight-edge artifacts vs the
    Redshift render.
 
 Outcome: choose between A and B as the default path.
