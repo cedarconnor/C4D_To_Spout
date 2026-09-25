@@ -1,216 +1,218 @@
 # C4D → Spout: Research & Build Plan
 
-Goal: a Cinema 4D plugin that publishes the live viewport as a Spout sender, so
-TouchDesigner, Resolume, OBS, Unreal, etc. can receive it on the same Windows machine.
+**Goal:** when the scene changes, render the active camera, a Redshift **spherical
+lat-long** camera, at a **fixed 2:1 resolution** (e.g. 2048×1024), and publish the frame as a
+Spout sender. UE5 receives it and maps it onto sphere geometry for fast review.
 
-Target: Cinema 4D 2026.x (2026.3 is current), Windows 10/11 x64. Spout is Windows-only.
+- Update model: re-render on scene change. Continuous frame rate is not required.
+- Target: Cinema 4D 2026.x (2026.3 is current) with Redshift, on Windows 10/11 x64. Spout is
+  Windows-only.
 
 ---
 
-## 1. Research findings
+## 1. Why this can't be a viewport grab
+
+- The C4D viewport draws with a perspective projection. It **cannot display a spherical
+  lat-long projection**. Only Redshift renders that camera type.
+- `BaseDraw::GetViewportImage` returns whatever size the viewport happens to be, with the
+  HUD, grid and overlays included. It doesn't give a fixed 2:1 output.
+- Redshift's interactive render (the RenderView IPR, or the IPR shown in the viewport) has
+  **no public SDK access to its frame buffer**.
+
+**So the plugin drives Redshift renders itself:** `RenderDocument()` with Redshift at the
+fixed resolution. It's triggered on scene change, debounced, and a newer change cancels an
+older render.
+
+## 2. Research findings
 
 ### Cinema 4D SDK (2026.x)
-- **Build system:** CMake. CMake arrived in 2025.2 and became the only supported system in
-  2026.0. The SDK targets **C++20**. Builds use Visual Studio 2022. 2026.3 added Windows
-  ARM64 and Xcode 26 support.
-- **SDK source:** the full SDK (frameworks + CMake tooling) ships with C4D and is on
-  developers.maxon.net/downloads. The GitHub repos under `Maxon-Computer` hold **examples
-  only**, not the frameworks (`Cinema-4D-Cpp-API-Examples`, `Cinema-4D-Python-API-Examples`).
-- Each plugin module still has a `project/projectdefinition.txt` file (APIs used, `C4D=true`,
-  `ModuleId`). The CMake layer reads it. Output is a `.xdl64` in a folder under
-  `plugins/`.
-- **Viewport capture:** `BaseDraw::GetViewportImage(maxon::ImageRef&)` returns the current
-  colour framebuffer of a viewport. It is read-only and **C++ only** (Python doesn't wrap
-  it). Maxon staff have said it isn't built for high throughput. It's a GPU→CPU readback.
-- **No GPU handle is exposed.** The SDK doesn't give access to the viewport's
-  D3D/Vulkan/Metal device or textures. That rules out a zero-copy GPU-to-Spout path through
-  the public API. **Every workable path involves a CPU readback followed by a GPU upload.**
-- Useful hook points:
-  - `SceneHookData::Draw` runs inside the viewport draw cycle (per `BaseDraw`, per draw pass).
-  - `MessageData::CoreMessage` receives `EVMSG_CHANGE`, `EVMSG_DOCUMENTRECALCULATED`, and
-    others after redraws.
-  - `MessageData::GetTimer` provides a periodic tick on the main thread.
-  - `CommandData` + `GeDialog` provide the UI.
+- **Build:** CMake-only since 2026.0, targeting C++20, built with VS 2022. The full SDK ships
+  with C4D and on developers.maxon.net. The `Maxon-Computer` GitHub repos contain only
+  examples.
+- **`RenderDocument(doc, settings, progressHook, …, bmp, flags, BaseThread* th)`.** From the
+  SDK's own `examples_ocio.cpp`: "RenderDocument itself is not inherently main thread bound".
+  It blocks the calling thread while the render runs on a dedicated render thread. The `th`
+  argument lets a caller's thread cancel the render.
+- **Colour (important in 2026):** new documents are OCIO by default. The SDK example:
+  - renders into a `MultipassBitmap` with `COLORMODE::RGBf`
+  - sets `RDATA_BAKE_OCIO_VIEW_TRANSFORM_RENDER = false`, which keeps linear render-space data
+  - calls `BakeOcioViewToBitmap(bmp, settings, savebit)` to get display-referred pixels
 
-### Spout 2 SDK (leadedge/Spout2, v2.007.017, BSD-2-Clause)
-- Components are **SpoutDX** (DirectX 11), **SpoutGL** (OpenGL) and **SpoutLibrary** (a
-  C-compatible DLL).
-- **SpoutDX** fits best. It creates its own D3D11 device with `OpenDirectX11()`, and
-  `SendImage(pData, w, h, pitch)` uploads a CPU pixel buffer into the shared texture through
-  `UpdateSubresource`. That matches our situation exactly: we have CPU pixels and no host GPU
-  context.
-- Pixel format: the shared texture defaults to `DXGI_FORMAT_B8G8R8A8_UNORM`, and
-  `SetSenderFormat()` can change it. SendImage assumes 4 bytes per pixel.
-- Not thread-safe. Keep all SpoutDX calls on **one** thread.
-- SpoutDX.cpp needs these files from `SPOUTSDK/SpoutGL/`: `SpoutDirectX`,
+  We do the same, and get output that matches what the user sees in Redshift.
+- **Scene-change events:** `MessageData::CoreMessage` receives `EVMSG_CHANGE`.
+  `MessageData::GetTimer` provides a debounce tick. `bd->GetSceneCamera(doc)` gives the active
+  camera.
+- **Threading rules:** clone the document on the main thread
+  (`doc->GetClone(COPYFLAGS::DOCUMENT)`), then render the clone on a worker thread. Never touch
+  the live document off the main thread.
+
+### Redshift
+- Spherical output comes from the Redshift camera settings: Type **Spherical**, projection
+  **Latitude-Longitude**, 360°×180° FOV. Rendered through RenderDocument, it produces a proper
+  equirectangular image.
+- **Render settings strategy:** don't hard-code Redshift parameter IDs. The user creates a
+  render setting in the scene, e.g. **"Spout Preview"**, with the Redshift renderer, low
+  samples and the denoiser. The plugin renders with that `RenderData` and overrides only the
+  resolution. Quality and speed stay under the user's control, with no Redshift API coupling.
+- **Latency is the main unknown.** Each RenderDocument call re-translates the whole scene.
+  There's no incremental update like the IPR has. The first render also pays the Redshift GPU
+  init cost. It needs measuring (see Phase 1).
+- Licensing: RenderDocument with Redshift GPU needs a Redshift GPU licence, just as a normal
+  render would.
+
+### Spout 2 (leadedge/Spout2, v2.007.017, BSD-2-Clause)
+- **SpoutDX** creates its own D3D11 device (`OpenDirectX11()`).
+  `SendImage(pixels, w, h, pitch)` uploads a CPU buffer to the shared texture.
+- It supports `SetSenderFormat()`: `DXGI_FORMAT_R8G8B8A8_UNORM` for display-referred 8-bit, or
+  `R16G16B16A16_FLOAT` for linear HDR if UE should handle the colour.
+- Not thread-safe, so one thread owns it. Senders don't need a steady frame rate: receivers
+  keep the last frame, which suits "update on change".
+- Sources needed: `SpoutDX.cpp/.h` plus these from `SPOUTSDK/SpoutGL/`: `SpoutDirectX`,
   `SpoutSenderNames`, `SpoutFrameCount`, `SpoutCopy`, `SpoutUtils`, `SpoutSharedMemory`,
   `SpoutCommon.h`. Link `d3d11.lib`, `dxgi.lib`.
-- Extras: `HoldFps()`, `SetFrameSync()`, and `SetFrameCount` (frame counting for receivers).
 
-### Prior art
-None found. No public C4D Spout sender exists (other hosts such as Unreal have one).
-
----
-
-## 2. Approach options
-
-| Option | How | Verdict |
-|---|---|---|
-| **A. C++ + `GetViewportImage` + SpoutDX::SendImage** | Read the viewport framebuffer, convert it to BGRA8, and send it on a worker thread | **Chosen.** This is the only way to get the real interactive viewport at interactive rates. |
-| B. Offscreen "Viewport Renderer" via `RenderDocument` | Render the document with the hardware preview renderer at a fixed resolution | Keep as a secondary mode (Phase 4). It allows arbitrary resolution and alpha with no HUD or grid, but it's slower and not the "live viewport". |
-| C. Python + SpoutGL pip package | Python has no `GetViewportImage`, so it would have to use RenderDocument | Rejected: too slow, and adds a GL context inside C4D. |
-| D. Zero-copy GPU sharing | Needs the viewport's D3D/Vulkan texture | Not possible with the public SDK. |
-| E. Screen capture (DXGI Desktop Duplication) of the viewport's screen rect | Capture pixels from the OS | Rejected as primary: it grabs overlapping windows, breaks on multiple monitors or DPI scaling, and is fragile. Possible last resort if A fails the spike. |
+### UE5 side (outside this repo, noted for completeness)
+- Use a UE5 Spout receiver plugin, e.g. the Off World Live toolkit or an open-source Spout2
+  UE plugin. It writes to a Render Target.
+- Use an unlit material with the Render Target on the sphere. If you view from inside, check
+  the U flip / inward normals and the seam orientation. Equirect U=0 in Redshift vs the
+  sphere's UV seam may need a 90° or 180° offset.
+- UE doesn't need a matching 2:1 texture size; any power-of-two-ish 2:1 works.
 
 ---
 
-## 3. Architecture (Option A)
+## 3. Architecture
 
 ```
-C4D main thread                              Sender thread (owns SpoutDX)
-────────────────                             ─────────────────────────────
-Trigger (draw hook / timer / EVMSG)
-  └─ BaseDraw* bd = doc->GetActiveBaseDraw() or chosen view
-  └─ bd->GetViewportImage(img)
-  └─ convert img → BGRA8 (+ flip if needed)
-  └─ push into triple buffer ───────────────▶ wait for new frame
-                                              └─ spout.SendImage(buf, w, h)
-                                              └─ recreate sender on size change
+Main thread (MessageData)                         Render worker (C4DThread)          Spout thread
+─────────────────────────                         ─────────────────────────          ────────────
+EVMSG_CHANGE → mark dirty, restart debounce
+Timer tick (debounce elapsed, e.g. 250 ms):
+  if render running → request cancel (th)
+  clone doc; set camera = bd->GetSceneCamera()
+  pick "Spout Preview" RenderData, set XRES/YRES
+  hand clone to worker ────────────────────────▶  RenderDocument(clone, rd, …, bmp, th)
+                                                  if cancelled → drop
+                                                  BakeOcioViewToBitmap → RGBA8/16F
+                                                  flip rows if needed
+                                                  push latest frame ──────────────▶ SendImage()
+                                                  free clone                        (sender kept
+                                                                                     alive between
+                                                                                     frames)
 ```
 
-- **Main thread work stays minimal:** readback plus conversion into a pre-allocated buffer.
-  Skip the frame if the conversion would exceed a budget.
-- **Triple buffer / latest-frame-wins:** the sender never blocks C4D, and stale frames are
-  dropped.
-- **SpoutDX lives entirely on the sender thread:** `OpenDirectX11`, `SetSenderName`,
-  `SendImage`, `ReleaseSender`, `CloseDirectX11`.
-- **Resize handling:** SendImage recreates the shared texture when w/h changes. Receivers
-  pick that up automatically.
-- **Pixel conversion:** use the Image API (`ImageRef::GetPixelFormat`, `GetPixelHandler` /
-  `GetPixelStorage`) to read rows as `PixelFormats::RGBA::U8()`. Then either swizzle to BGRA,
-  or call `SetSenderFormat(DXGI_FORMAT_R8G8B8A8_UNORM)` and skip the swizzle. Check whether
-  the buffer is float or linear (OCIO in 2026) and apply sRGB/view transform if it looks wrong
-  in receivers.
+- **Latest wins:** at most one render runs at a time. Changes that arrive during a render
+  mark it stale. It gets cancelled via `th`, or finished and immediately followed by a
+  re-render, depending on which proves faster in Phase 1.
+- **Change filtering:** `EVMSG_CHANGE` also fires on selection and UI changes. Start by
+  accepting all changes, plus the debounce. Refine later if it re-renders too often, e.g. by
+  comparing `doc->GetDirty(DIRTYFLAGS::DATA | DIRTYFLAGS::MATRIX)` and the camera matrix.
+- **No live-document mutation:** all overrides apply to the clone and a copy of the render
+  settings.
 
 ### Plugin components
 | Class | Type | Role |
 |---|---|---|
-| `SpoutSenderThread` | `maxon::Thread` or `std::thread` | Owns SpoutDX and runs the send loop |
-| `ViewportGrabber` | helper | GetViewportImage → BGRA8 buffer |
-| `SpoutCaptureHook` | `SceneHookData` **or** `MessageData` (chosen in the spike) | Decides when to grab |
-| `SpoutCommand` + `SpoutDialog` | `CommandData` + `GeDialog` | Start/Stop, sender name, viewport choice, FPS cap, flip, status (res/fps) |
-| `main.cpp` | — | `PluginStart` / `PluginMessage` / `PluginEnd`. Stop the thread and release Spout on `C4DPL_ENDACTIVITY` |
+| `SpoutPreviewMessage` | `MessageData` | Listens for changes, debounces on a timer, clones the doc and dispatches renders |
+| `RenderWorker` | `C4DThread` | Runs RenderDocument, the OCIO bake and pixel conversion |
+| `SpoutSenderThread` | `C4DThread` / `std::thread` | Owns SpoutDX; sends the latest frame |
+| `SpoutPreviewCommand` + `SpoutPreviewDialog` | `CommandData` + `GeDialog` | UI (below) |
+| `main.cpp` | — | Registration. On `C4DPL_ENDACTIVITY`: cancel the render, join threads, release the sender |
 
-Settings persist in the world plugin container (`SetWorldPluginData`).
+**Dialog:** Enable toggle · Sender name (default `C4D_LatLong`) · Resolution preset
+(1024×512 / 2048×1024 / 4096×2048 / custom, locked 2:1 by default) · Render setting picker
+(default: one named "Spout Preview", else active) · Output: 8-bit display (view transform
+baked) or 16-bit float linear · Debounce ms · "Render now" button · Status: last render time
+and state (idle / rendering / cancelled / error).
+
+Settings persist in the world plugin container. Optionally they can also live in the
+document, per scene.
 
 ---
 
-## 4. Phased build plan
+## 4. Phased plan
 
 ### Phase 0 – Environment (½ day)
-1. Install C4D 2026.3, VS 2022 (Desktop C++), CMake ≥ the SDK minimum, and a Windows SDK.
-2. Download the matching C4D C++ SDK. Build `example.hello_world` through the SDK's CMake
-   presets and confirm it loads in C4D.
-3. Register plugin IDs on developers.maxon.net: one for the command, one for the
-   hook/message plugin.
-4. Add Spout2 as a git submodule under `external/Spout2`, pinned to a release tag.
-5. Install receivers for testing: SpoutReceiver demo (from the Spout release) and
-   TouchDesigner or OBS + Spout plugin.
+C4D 2026.3 + Redshift, VS 2022, CMake, and the C4D C++ SDK. Build `example.hello_world` and
+confirm it loads. Register 2 plugin IDs on developers.maxon.net. Add Spout2 as a git
+submodule, pinned to a tag. Install the SpoutReceiver demo and a UE5 Spout receiver.
 
-### Phase 1 – Capture spike (1–2 days) — **the key risk**
-Measure the following before building anything else:
-- Where `GetViewportImage` returns a complete frame:
-  (a) `SceneHookData::Draw` at the last draw pass,
-  (b) `MessageData::CoreMessage(EVMSG_CHANGE)` after the redraw,
-  (c) a timer tick.
-- Whether it includes the HUD, grid, safe frames, or selection highlights, and whether those
-  can be toggled.
-- Pixel format, bit depth, colour space, row order (flip?), and alpha contents.
-- Cost at 1080p and 4K (ms per call). Target is under 8 ms at 1080p.
-- Behaviour during timeline playback, with multiple viewports, and with Redshift IPR in the
-  viewport.
+### Phase 1 – Latency spike (1 day) — **decides whether the approach is fast enough**
+Use a quick **Python** script in the Script Manager. It needs no build, because
+`c4d.documents.RenderDocument` is available there. Render the active spherical camera with
+the "Spout Preview" settings at 1024×512, 2048×1024 and 4096×2048, and measure:
+- first render vs subsequent renders (Redshift init cost)
+- scene translation time vs render time, on light and heavy test scenes
+- the effect of samples and denoiser on time
+- that the output is correct equirect, and that colours match after the OCIO bake
 
-Exit criteria: a reliable trigger point and known pixel format. If GetViewportImage is
-unusable, fall back to Option E or B.
+Targets: under 1 s at 2048×1024 for a typical review scene. If the times are far worse, the
+alternatives are lower preview resolution, fewer samples, disabling GI in the preview
+setting, or accepting the latency.
 
-### Phase 2 – MVP sender (2–3 days)
-1. CMake: add the Spout sources (SpoutDX + the SpoutGL helpers listed above) to the module
-   and link `d3d11`, `dxgi`. Compile Spout without C4D's stylecheck, or build it as a static
-   lib target.
-2. Implement `SpoutSenderThread` with a latest-frame buffer and a condition variable.
-3. Implement `ViewportGrabber` and the chosen trigger.
-4. Add a menu command that toggles send on/off using sender name "Cinema 4D".
-5. Verify the image in the SpoutReceiver demo: orientation, colours, resize, start/stop,
-   and closing C4D with the sender active.
+### Phase 2 – MVP C++ plugin (2–3 days)
+1. CMake module with the Spout sources and `d3d11`/`dxgi` linked. Keep Spout out of C4D's
+   stylecheck, e.g. as a separate static lib target.
+2. `SpoutSenderThread` and a "send test pattern" command. Verify in the SpoutReceiver demo
+   and in UE5.
+3. `RenderWorker`: clone, RenderDocument, OCIO bake, RGBA8, send. Triggered by a "Render now"
+   command.
+4. Verify in UE: orientation, seam, colours, and 2:1 mapping on the sphere.
 
-### Phase 3 – UI & robustness (2–3 days)
-- Dialog: sender name, source viewport (active / specific view / render view), FPS cap
-  (`HoldFps` or trigger throttling), flip, alpha on/off, and a live status line.
-- Handle document switching, viewport layout changes, sender name collisions, and D3D device
-  loss.
-- Force continuous redraw option (e.g. `DrawViews` on a timer) for receivers that want a
-  steady frame rate while the scene is idle.
-- Colour management: match the viewport's view transform (OCIO) in the output.
+### Phase 3 – Auto-update on change (1–2 days)
+`MessageData` with EVMSG_CHANGE, debounce, latest-wins, and cancellation. Test while dragging
+objects and orbiting the camera, switching documents, closing C4D mid-render, and running a
+normal Picture Viewer render at the same time (see risks).
 
-### Phase 4 – Optional extras
-- **Render mode (Option B):** fixed output resolution with clean alpha, rendered by the
-  Viewport/Hardware renderer into its own sender.
-- Multiple senders (one per viewport).
-- Frame sync (`SetFrameSync`) for receivers that need it.
-- Python binding (`c4d.plugins` command IDs) so scripts can start and stop the sender.
-- macOS Syphon counterpart (same grabber, different transport).
+### Phase 4 – UI & polish (1–2 days)
+Dialog, persistence, the 16-bit float linear option, the status line, and error reporting:
+no camera, non-Redshift render setting, render failure.
 
 ### Phase 5 – Packaging
-- Release build `.xdl64` + `res/` folder zipped as `C4D_To_Spout/`. Add a README with install
-  steps and the Spout BSD-2 licence notice.
-- GitHub Actions on `windows-latest` is only possible if the C4D SDK can be fetched in CI.
-  The SDK isn't redistributable, so plan on local builds unless a private artifact is set up.
+Release `.xdl64` + `res/` as a zip. README covering install, how to set up the "Spout
+Preview" render setting and the Redshift spherical camera, the UE5 material setup, and the
+Spout BSD-2 notice. CI is unlikely, because the C4D SDK isn't redistributable.
 
 ---
 
-## 5. Proposed repo layout
+## 5. Repo layout
 
 ```
 C4D_To_Spout/
   PLAN.md
   README.md
-  external/Spout2/              (submodule)
+  external/Spout2/                 (submodule)
+  prototype/render_latency.py      (Phase 1 spike)
   plugin/c4d_to_spout/
     project/projectdefinition.txt
-    CMakeLists.txt              (if the SDK's CMake layer needs per-module additions)
-    res/                        (c4d_symbols.h, dialogs, strings_us)
+    res/                           (c4d_symbols.h, dialogs, strings_us)
     source/
       main.cpp
-      spout_command.cpp/.h      (CommandData + GeDialog)
-      capture_hook.cpp/.h       (SceneHookData or MessageData)
-      viewport_grabber.cpp/.h
-      spout_sender_thread.cpp/.h
+      preview_message.cpp/.h       (MessageData: change detection + dispatch)
+      render_worker.cpp/.h         (RenderDocument + OCIO bake + conversion)
+      spout_sender_thread.cpp/.h   (SpoutDX owner)
+      preview_command.cpp/.h       (CommandData + GeDialog)
 ```
 
-Build: copy or symlink `plugin/c4d_to_spout` into the SDK's `plugins/` folder, then run
-the SDK CMake preset. Alternatively, point the SDK's CMake config at this repo if it supports
-external plugin paths.
-
----
-
 ## 6. Risks & open questions
-1. **GetViewportImage behaviour and cost.** The whole approach depends on it, and Phase 1
-   settles it.
-2. **HUD/grid in the image.** If they can't be excluded, users have to hide them in view
-   settings, or use Render mode.
-3. **Colour space.** The 2026 OCIO pipeline may give linear or float data, which needs a
-   transform.
-4. **Frame rate.** A CPU round-trip at 4K will not hit 60 fps. 1080p should be fine.
-5. **Idle viewport.** C4D only redraws on change, so the sender sends nothing while the scene
-   is idle. That's normal for Spout (receivers keep the last frame), but the force-redraw
-   option covers users who need continuous frames.
-6. **SDK details not verified here.** developers.maxon.net was unreachable from this
-   environment. Confirm the exact `GetViewportImage` signature and the per-module CMake hooks
-   against the 2026.3 SDK docs.
+1. **Redshift RenderDocument latency.** A full scene translation happens on every change;
+   Phase 1 measures it. This is the main risk to "fast review".
+2. **Concurrent renders.** A background Redshift render may conflict with a user-started
+   Picture Viewer render or the IPR on the same GPU. Test this, and optionally auto-pause
+   while other renders run.
+3. **Cancellation.** How quickly Redshift honours `BaseThread` cancellation. If it's slow, use
+   "finish, then re-render latest" instead.
+4. **Colour.** Choose between 8-bit display-referred (simple; UE shows it as-is on an unlit
+   material) and 16F linear (correct if UE applies its own tonemapping). Default to 8-bit.
+5. **Clone cost.** Cloning large documents on the main thread causes a UI hitch each time.
+   The debounce limits how often; measure it on heavy scenes.
+6. **Not verified from here.** developers.maxon.net was unreachable from this environment.
+   Confirm the RenderDocument/OCIO details against the 2026.3 docs. They came from the SDK's
+   own example code on GitHub.
 
 ## 7. References
-- Spout: https://spout.zeal.co/ · SDK: https://github.com/leadedge/Spout2 (SpoutDX: `SPOUTSDK/SpoutDirectX/SpoutDX`)
+- Spout: https://spout.zeal.co/ · SDK: https://github.com/leadedge/Spout2 (`SPOUTSDK/SpoutDirectX/SpoutDX`)
 - C4D C++ SDK docs: https://developers.maxon.net/docs/cpp/ · 2026.3 SDK release: https://developers.maxon.net/forum/topic/16419/maxon-cinema-4d-2026.3-sdk-release
 - CMake migration: https://developers.maxon.net/docs/cpp/2026_1_0/manual_migrating_to_2026.html
-- Viewport capture thread (GetViewportImage): https://developers.maxon.net/topic/14684/stream-the-viewport-to-python-api-that-sends-an-image-back-and-use-that-as-a-texture
-- Examples: https://github.com/Maxon-Computer/Cinema-4D-Cpp-API-Examples
+- RenderDocument + OCIO example: https://github.com/Maxon-Computer/Cinema-4D-Cpp-API-Examples (`plugins/example.image/source/examples_ocio.cpp`)
+- Viewport capture limits: https://developers.maxon.net/topic/14684/stream-the-viewport-to-python-api-that-sends-an-image-back-and-use-that-as-a-texture
