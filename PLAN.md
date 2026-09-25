@@ -12,6 +12,9 @@ sphere geometry for fast review.
 
 ## 1. Key fact: the viewport already draws the spherical projection
 
+**Decision:** pursue **method A**. The viewport's RS Spherical view is confirmed to cover the
+full 360°×180° edge to edge inside the camera frame. B stays as the fallback only.
+
 With a Redshift Camera set to **Projection → Type: Spherical** as the scene camera, the
 standard C4D hardware viewport draws the 360° lat-long projection itself. No Redshift render
 or IPR is involved. That means we can use the fast viewport pipeline instead of a full
@@ -147,7 +150,7 @@ confirm it loads. Register 2 plugin IDs. Add Spout2 as a pinned submodule. Insta
 SpoutReceiver demo and a UE5 Spout receiver.
 
 ### Phase 1 – Python spike (1 day, no build needed)
-Run `prototype/spike.py` in the Script Manager against a scene like `Camping.c4d`:
+Run `prototype/spike_method_a.py` in the Script Manager against a scene like `Camping.c4d`:
 1. **The deciding test:** `RenderDocument` with the Viewport Renderer at 2048×1024 using the
    RS Spherical camera. Does the output show the spherical projection, or a plain perspective
    view?
@@ -190,7 +193,7 @@ C4D_To_Spout/
   PLAN.md
   README.md
   external/Spout2/                 (submodule)
-  prototype/spike.py               (Phase 1)
+  prototype/spike_method_a.py      (Phase 1)
   plugin/c4d_to_spout/
     project/projectdefinition.txt
     res/
