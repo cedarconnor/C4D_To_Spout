@@ -1,28 +1,29 @@
-// C4D to Spout: module entry point and the Phase 2 commands.
+// C4D to Spout: module entry point and commands.
 //
-// Phase 2 MVP: everything (render + Spout send) runs on the main thread when a command is
-// invoked. SpoutDX is owned by the main thread, which satisfies its single-thread requirement.
-// Auto-update on scene change is Phase 3.
+// Everything (render + Spout send) runs on the main thread. SpoutDX is owned by the main
+// thread, which satisfies its single-thread requirement.
 
 #include "c4d.h"
 #include "c4d_plugin.h"
 #include "c4d_resource.h"
 
-#include "render_capture.h"
+#include "auto_update.h"
+#include "pipeline.h"
 #include "spout_sender.h"
 
 using namespace cinema;
+using c2s::DEFAULT_WIDTH;
+using c2s::SENDER_NAME;
 
 namespace
 {
 
 // Development IDs (Maxon reserves 1000001-1000010 for testing). Replace with registered IDs
-// from https://developers.maxon.net/forum/pid before distributing.
+// from https://developers.maxon.net/forum/pid before distributing. 1000003 is the auto-update
+// message plugin (auto_update.cpp).
 constexpr Int32 ID_C2S_TEST_PATTERN = 1000001;
 constexpr Int32 ID_C2S_RENDER_NOW = 1000002;
-
-constexpr const char* SENDER_NAME = "C4D_LatLong";
-constexpr Int32 DEFAULT_WIDTH = 2048;
+constexpr Int32 ID_C2S_AUTO_UPDATE_TOGGLE = 1000004;
 
 // Colour-coded lat-long matching prototype/spout_test_scene.c4d: centre (+Z) red, 3/4 width
 // (+X) green, 1/4 width (-X) yellow, seam (-Z) blue, top band magenta, bottom band cyan, with
@@ -59,15 +60,6 @@ void MakeTestPattern(maxon::BaseArray<UChar>& rgba, Int32 w, Int32 h)
 	}
 }
 
-maxon::Result<void> Send(const UChar* rgba, Int32 w, Int32 h)
-{
-	if (!c2s::SpoutOpen(SENDER_NAME))
-		return maxon::UnexpectedError(MAXON_SOURCE_LOCATION, "Could not initialize Spout (D3D11)."_s);
-	if (!c2s::SpoutSendRGBA8(rgba, UInt32(w), UInt32(h)))
-		return maxon::UnexpectedError(MAXON_SOURCE_LOCATION, "Spout SendImage failed."_s);
-	return maxon::OK;
-}
-
 maxon::Result<void> SendTestPattern()
 {
 	iferr_scope;
@@ -76,25 +68,8 @@ maxon::Result<void> SendTestPattern()
 	maxon::BaseArray<UChar> rgba;
 	rgba.Resize(Int(w) * Int(h) * 4) iferr_return;
 	MakeTestPattern(rgba, w, h);
-	Send(rgba.GetFirst(), w, h) iferr_return;
+	c2s::SendRGBA8(rgba.GetFirst(), w, h) iferr_return;
 	ApplicationOutput("[C4D to Spout] Sent @x@ test pattern as '@'.", w, h, String(SENDER_NAME));
-	return maxon::OK;
-}
-
-maxon::Result<void> RenderAndSend(BaseDocument* doc)
-{
-	iferr_scope;
-	const Int32 width = doc && doc->GetActiveRenderData()
-		? Int32(doc->GetActiveRenderData()->GetDataInstanceRef().GetFloat(RDATA_XRES, DEFAULT_WIDTH))
-		: DEFAULT_WIDTH;
-
-	c2s::CaptureResult cap = c2s::CaptureLatLong(doc, width) iferr_return;
-	if (cap.notTwoToOne)
-		ApplicationOutput("[C4D to Spout] Warning: render settings film aspect is not 2:1; the lat-long will be stretched.");
-
-	Send(cap.rgba.GetFirst(), cap.width, cap.height) iferr_return;
-	ApplicationOutput("[C4D to Spout] Sent @x@ (render @ ms) as '@'.",
-		cap.width, cap.height, Int32(cap.renderMs), String(SENDER_NAME));
 	return maxon::OK;
 }
 
@@ -114,9 +89,35 @@ class RenderNowCommand : public CommandData
 public:
 	Bool Execute(BaseDocument* doc, GeDialog* parentManager) override
 	{
-		iferr (RenderAndSend(doc))
-			ApplicationOutput("[C4D to Spout] Render failed: @", err);
+		const maxon::Result<c2s::SendInfo> result = c2s::RenderAndSend(doc);
+		if (result == maxon::FAILED)
+		{
+			ApplicationOutput("[C4D to Spout] Render failed: @", result.GetError());
+			return true;
+		}
+		const c2s::SendInfo& info = result.GetValue();
+		if (info.notTwoToOne)
+			ApplicationOutput("[C4D to Spout] Warning: render settings frame is not 2:1; the lat-long will be stretched.");
+		ApplicationOutput("[C4D to Spout] Sent @x@ (render @ ms) as '@'.",
+			info.width, info.height, Int32(info.renderMs), String(SENDER_NAME));
 		return true;
+	}
+};
+
+class AutoUpdateToggleCommand : public CommandData
+{
+public:
+	Bool Execute(BaseDocument* doc, GeDialog* parentManager) override
+	{
+		const bool enable = !c2s::IsAutoUpdateEnabled();
+		c2s::SetAutoUpdateEnabled(enable);
+		ApplicationOutput("[C4D to Spout] Auto update @.", enable ? "on"_s : "off"_s);
+		return true;
+	}
+
+	Int32 GetState(BaseDocument* doc, GeDialog* parentManager) override
+	{
+		return CMD_ENABLED | (c2s::IsAutoUpdateEnabled() ? CMD_VALUE : 0);
 	}
 };
 
@@ -129,6 +130,11 @@ Bool cinema::PluginStart()
 		return false;
 	if (!RegisterCommandPlugin(ID_C2S_RENDER_NOW, "C4D to Spout: Render Now"_s, 0, nullptr,
 				"Render the scene camera with the Viewport Renderer and send it over Spout"_s, NewObjClear(RenderNowCommand)))
+		return false;
+	if (!RegisterCommandPlugin(ID_C2S_AUTO_UPDATE_TOGGLE, "C4D to Spout: Auto Update"_s, 0, nullptr,
+				"Re-render and send over Spout whenever the scene changes"_s, NewObjClear(AutoUpdateToggleCommand)))
+		return false;
+	if (!c2s::RegisterAutoUpdate())
 		return false;
 	ApplicationOutput("[C4D to Spout] Loaded.");
 	return true;

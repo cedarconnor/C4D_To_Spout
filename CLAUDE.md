@@ -68,7 +68,26 @@ over **Spout**. The user maps it onto sphere geometry in **UE5** for fast 360 re
     and return the previous frame. With send-on-change, a CPU receiver sees an empty frame
     until a second send. GPU receivers (UE) are unaffected.
 - [ ] Phase 2 remaining: verify on the UE5 sphere (seam, U direction, colour).
-- [ ] Phase 3+: auto-update on change (PLAN.md §4).
+- [x] **Phase 3 auto-update (2026-09-26):** "C4D to Spout: Auto Update" toggle command
+  (1000004, checkmark state) plus a `MessageData` timer (1000003, 50 ms tick, only while
+  enabled), in `source/auto_update.cpp`.
+  - It polls a change signature: active doc, scene camera plus its MATRIX/DATA dirty,
+    current time, and `doc->GetHDirty(OBJECT|MATRIX|HIERARCHY|TAG|MATERIAL|SHADER|
+    RENDERSETTINGS|VP)`. NBITS is excluded, so selection doesn't re-render.
+  - It renders when the scene has been stable for 150 ms, or at most every 500 ms during
+    continuous change. Latest wins. It skips while an external (Picture Viewer) render runs.
+  - The post-render signature is recorded as "sent", so the plugin can't re-render its own
+    side effects.
+  - Still main thread only (deviation from PLAN §3's worker/Spout threads). The Viewport
+    Renderer is fast enough, and it removes all cancel/join shutdown issues.
+  - Verified via MCP and `spout_grab`: toggling on sends immediately; moving an object and
+    rotating the camera propagate within about 0.8 s; switching documents follows the
+    active doc (and resizes the sender); idle CPU stays ~4% of one core (no loop); a clean
+    shutdown with it on leaves no crash report.
+  - Not yet exercised: interactive drags, playback throttle feel, a concurrent Picture
+    Viewer render.
+- [ ] Phase 4: dialog/persistence (enabled state resets to off each launch), Redshift
+  engine option, 16F output, status/errors.
 
 ## User preferences
 Brief and concise, with no flattery. Disagree and propose alternatives when warranted. The

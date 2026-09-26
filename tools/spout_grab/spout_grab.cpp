@@ -77,8 +77,8 @@ int main(int argc, char** argv)
 				{
 					if (!WriteBmp(out.c_str(), pixels.data(), w, h))
 						return 3;
-					std::printf("Received '%s' %ux%u format=%d -> %s\n", name.c_str(), w, h,
-						int(receiver.GetSenderFormat()), out.c_str());
+					std::printf("Received '%s' %ux%u format=%d frame=%ld -> %s\n", name.c_str(), w, h,
+						int(receiver.GetSenderFormat()), receiver.GetSenderFrame(), out.c_str());
 					receiver.ReleaseReceiver();
 					return 0;
 				}
