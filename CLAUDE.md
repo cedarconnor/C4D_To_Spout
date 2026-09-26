@@ -35,11 +35,20 @@ over **Spout**. The user maps it onto sphere geometry in **UE5** for fast 360 re
 
 ## Status
 - [x] Research + plan (`PLAN.md`)
-- [x] Phase 1 spike script written: `prototype/spike_method_a.py`. It has **not yet been run
-  by the user.**
-- [ ] Waiting for spike results: does the Viewport Renderer PNG show the spherical
-  projection? Timings at 1K/2K/4K? Any console errors? If it's plain perspective, switch to
-  method B.
+- [x] Phase 1 spike script written: `prototype/spike_method_a.py`.
+- [x] **Spike PASSED (2026-09-26, C4D 2026.3.4, run via MCP bridge):** `RenderDocument`
+  with the Viewport Renderer through the RS Spherical camera produces a correct 2:1
+  equirect. +Z is at the centre, +X at 3/4 width, −X at 1/4, −Z at the seam, the poles
+  are correct, and there is no HUD. Each round trip includes PNG save: 1K < 1 s,
+  2K ≈ 0.9 s, 4K ≈ 1.4 s. Redshift (method C) renders the same geometry. Scene:
+  `prototype/spout_test_scene.c4d`; outputs are in `prototype/out/`.
+  - `RenderDocument` returns code 1 (and the viewport is blank) if a document's
+    colour management carries a broken OCIO config. Here it came from the machine-wide
+    `OCIO` env var, now removed. The plugin should detect code 1 and report it clearly.
+  - The Redshift render data needs the Redshift video post (1036219) attached, or the
+    output is black.
+  - `preview_render` in the MCP bridge adds viewport HUD overlays; `RenderDocument` with
+    the doc's RenderData does not.
 - [ ] Phase 2+: C++ plugin (see PLAN.md §4 and the repo layout in §5).
 
 ## User preferences
