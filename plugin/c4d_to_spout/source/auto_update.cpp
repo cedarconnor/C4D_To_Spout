@@ -4,6 +4,7 @@
 #include "c4d_messagedata.h"
 
 #include "pipeline.h"
+#include "settings.h"
 
 using namespace cinema;
 
@@ -13,12 +14,7 @@ namespace c2s
 namespace
 {
 
-// Development ID (Maxon reserves 1000001-1000010 for testing).
-constexpr Int32 ID_C2S_AUTO_UPDATE_MESSAGE = 1000003;
-
 constexpr Int32 TIMER_MS = 50;
-constexpr Int64 DEBOUNCE_MS = 150;  // Render once the scene is stable this long...
-constexpr Int64 THROTTLE_MS = 500;  // ...or at least this often during continuous changes.
 
 // Everything that should trigger a re-render. Selection/visibility bits (NBITS) are excluded
 // so that merely selecting objects does not re-render.
@@ -65,17 +61,17 @@ Int64 NowMs()
 class AutoUpdateMessage : public MessageData
 {
 public:
-	Bool enabled = false;
 	Bool forced = false;
 
-	Int32 GetTimer() override { return enabled ? TIMER_MS : 0; }
+	Int32 GetTimer() override { return GetSettings().enabled ? TIMER_MS : 0; }
 
 	Bool CoreMessage(Int32 id, const BaseContainer& bc) override
 	{
-		// Re-query GetTimer promptly after the toggle command.
+		// Wake-up after the toggle: GetTimer() is re-queried after this message.
 		if (id == ID_C2S_AUTO_UPDATE_MESSAGE)
 			return true;
-		if (id != MSG_TIMER || !enabled)
+		const Settings& settings = GetSettings();
+		if (id != MSG_TIMER || !settings.enabled)
 			return true;
 
 		// Do not compete with a user's Picture Viewer render.
@@ -99,12 +95,12 @@ public:
 		if (!dirty || !doc)
 			return true;
 
-		const Bool stable = now - _lastChangeMs >= DEBOUNCE_MS;
-		const Bool overdue = now - _firstChangeMs >= THROTTLE_MS;
+		const Bool stable = now - _lastChangeMs >= Int64(settings.debounceMs);
+		const Bool overdue = now - _firstChangeMs >= Int64(settings.throttleMs);
 		if (!forced && !stable && !overdue)
 			return true;
 
-		const maxon::Result<SendInfo> result = RenderAndSend(doc);
+		const maxon::Result<void> result = RenderAndSend(doc); // Updates GetStatus().
 		if (result == maxon::FAILED)
 		{
 			// Log once per scene state, not every tick.
@@ -115,14 +111,6 @@ public:
 			forced = false;
 			return true;
 		}
-		const SendInfo& info = result.GetValue();
-
-		if (info.notTwoToOne && !_warnedAspect)
-		{
-			ApplicationOutput("[C4D to Spout] Warning: render settings frame is not 2:1; the lat-long will be stretched.");
-			_warnedAspect = true;
-		}
-		StatusSetText(FormatString("Spout @: @x@ (@ ms)", String(SENDER_NAME), info.width, info.height, Int32(info.renderMs)));
 
 		// Rendering may itself bump dirty counters; record the post-render state as sent so we
 		// don't re-render our own side effects.
@@ -138,7 +126,6 @@ public:
 	{
 		_pending = _sent = _failed = Signature();
 		_firstChangeMs = _lastChangeMs = 0;
-		_warnedAspect = false;
 	}
 
 private:
@@ -147,7 +134,6 @@ private:
 	Signature _failed;  // State of the last failed render (to avoid log spam).
 	Int64 _firstChangeMs = 0;
 	Int64 _lastChangeMs = 0;
-	Bool _warnedAspect = false;
 };
 
 AutoUpdateMessage* g_autoUpdate = nullptr; // Owned by Cinema 4D after registration.
@@ -159,19 +145,23 @@ bool RegisterAutoUpdate()
 	g_autoUpdate = NewObjClear(AutoUpdateMessage);
 	if (!g_autoUpdate)
 		return false;
+	// Start with whatever was persisted.
+	g_autoUpdate->forced = GetSettings().enabled;
 	return RegisterMessagePlugin(ID_C2S_AUTO_UPDATE_MESSAGE, "C4D to Spout Auto Update"_s, 0, g_autoUpdate);
 }
 
 bool IsAutoUpdateEnabled()
 {
-	return g_autoUpdate && g_autoUpdate->enabled;
+	return GetSettings().enabled;
 }
 
 void SetAutoUpdateEnabled(bool enabled)
 {
+	GetSettings().enabled = enabled;
+	SaveSettings();
+	BumpStateCounter();
 	if (!g_autoUpdate)
 		return;
-	g_autoUpdate->enabled = enabled;
 	g_autoUpdate->Reset();
 	g_autoUpdate->forced = enabled; // Send the current state right away.
 	// Wake the message plugin so GetTimer() is re-queried.
@@ -180,7 +170,7 @@ void SetAutoUpdateEnabled(bool enabled)
 
 void RequestAutoUpdate()
 {
-	if (g_autoUpdate && g_autoUpdate->enabled)
+	if (g_autoUpdate && GetSettings().enabled)
 	{
 		g_autoUpdate->forced = true;
 		SpecialEventAdd(ID_C2S_AUTO_UPDATE_MESSAGE);

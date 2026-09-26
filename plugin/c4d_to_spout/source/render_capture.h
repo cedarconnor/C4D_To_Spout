@@ -3,23 +3,33 @@
 
 #include "c4d.h"
 
+#include "settings.h"
+
 namespace c2s
 {
 
-struct CaptureResult
+struct CaptureOptions
 {
-	maxon::BaseArray<maxon::UChar> rgba; // Tightly packed RGBA8, top row first.
-	cinema::Int32 width = 0;
-	cinema::Int32 height = 0;
-	cinema::Float renderMs = 0.0;
-	cinema::Bool notTwoToOne = false; // Render settings frame (XRES:YRES) is not 2:1.
+	cinema::Int32 width = 0;  // 0 = render settings' XRES.
+	Engine engine = Engine::VIEWPORT;
+	OutputFormat format = OutputFormat::RGBA8_DISPLAY;
 };
 
-// Renders the document's scene camera with the Viewport Renderer at #width pixels wide. The
-// height follows the active render settings' frame, XRES:YRES (never the viewport aspect).
-// The OCIO view transform is baked, so the pixels are display-referred.
-// Must be called from the main thread.
-maxon::Result<CaptureResult> CaptureLatLong(cinema::BaseDocument* doc, cinema::Int32 width);
+struct CaptureResult
+{
+	maxon::BaseArray<maxon::UChar> pixels; // Top row first, tightly packed.
+	cinema::Int32 width = 0;
+	cinema::Int32 height = 0;
+	cinema::Int32 bytesPerPixel = 4;       // 4 (RGBA8) or 8 (RGBA16F).
+	cinema::Float renderMs = 0.0;
+	maxon::String warning;                 // Non-fatal issues (aspect, camera type).
+};
+
+// Renders the document's scene camera with its active render settings at #options.width
+// pixels wide. The height follows the render settings' frame, XRES:YRES (never the viewport
+// aspect). RGBA8 output has the OCIO view transform baked (display-referred); RGBA16F output
+// is raw render space (linear). Must be called from the main thread.
+maxon::Result<CaptureResult> CaptureLatLong(cinema::BaseDocument* doc, const CaptureOptions& options);
 
 } // namespace c2s
 

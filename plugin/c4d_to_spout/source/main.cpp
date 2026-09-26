@@ -8,22 +8,20 @@
 #include "c4d_resource.h"
 
 #include "auto_update.h"
+#include "dialog.h"
 #include "pipeline.h"
+#include "settings.h"
 #include "spout_sender.h"
 
 using namespace cinema;
-using c2s::DEFAULT_WIDTH;
-using c2s::SENDER_NAME;
+
+namespace c2s
+{
 
 namespace
 {
 
-// Development IDs (Maxon reserves 1000001-1000010 for testing). Replace with registered IDs
-// from https://developers.maxon.net/forum/pid before distributing. 1000003 is the auto-update
-// message plugin (auto_update.cpp).
-constexpr Int32 ID_C2S_TEST_PATTERN = 1000001;
-constexpr Int32 ID_C2S_RENDER_NOW = 1000002;
-constexpr Int32 ID_C2S_AUTO_UPDATE_TOGGLE = 1000004;
+constexpr Int32 TEST_PATTERN_WIDTH = 2048;
 
 // Colour-coded lat-long matching prototype/spout_test_scene.c4d: centre (+Z) red, 3/4 width
 // (+X) green, 1/4 width (-X) yellow, seam (-Z) blue, top band magenta, bottom band cyan, with
@@ -60,19 +58,6 @@ void MakeTestPattern(maxon::BaseArray<UChar>& rgba, Int32 w, Int32 h)
 	}
 }
 
-maxon::Result<void> SendTestPattern()
-{
-	iferr_scope;
-	const Int32 w = DEFAULT_WIDTH;
-	const Int32 h = DEFAULT_WIDTH / 2;
-	maxon::BaseArray<UChar> rgba;
-	rgba.Resize(Int(w) * Int(h) * 4) iferr_return;
-	MakeTestPattern(rgba, w, h);
-	c2s::SendRGBA8(rgba.GetFirst(), w, h) iferr_return;
-	ApplicationOutput("[C4D to Spout] Sent @x@ test pattern as '@'.", w, h, String(SENDER_NAME));
-	return maxon::OK;
-}
-
 class TestPatternCommand : public CommandData
 {
 public:
@@ -89,17 +74,15 @@ class RenderNowCommand : public CommandData
 public:
 	Bool Execute(BaseDocument* doc, GeDialog* parentManager) override
 	{
-		const maxon::Result<c2s::SendInfo> result = c2s::RenderAndSend(doc);
-		if (result == maxon::FAILED)
+		iferr (RenderAndSend(doc))
 		{
-			ApplicationOutput("[C4D to Spout] Render failed: @", result.GetError());
+			ApplicationOutput("[C4D to Spout] Render failed: @", err);
 			return true;
 		}
-		const c2s::SendInfo& info = result.GetValue();
-		if (info.notTwoToOne)
-			ApplicationOutput("[C4D to Spout] Warning: render settings frame is not 2:1; the lat-long will be stretched.");
-		ApplicationOutput("[C4D to Spout] Sent @x@ (render @ ms) as '@'.",
-			info.width, info.height, Int32(info.renderMs), String(SENDER_NAME));
+		const Status& st = GetStatus();
+		ApplicationOutput("[C4D to Spout] @", st.text);
+		if (!st.warning.IsEmpty())
+			ApplicationOutput("[C4D to Spout] Warning: @", st.warning);
 		return true;
 	}
 };
@@ -109,34 +92,53 @@ class AutoUpdateToggleCommand : public CommandData
 public:
 	Bool Execute(BaseDocument* doc, GeDialog* parentManager) override
 	{
-		const bool enable = !c2s::IsAutoUpdateEnabled();
-		c2s::SetAutoUpdateEnabled(enable);
+		const bool enable = !IsAutoUpdateEnabled();
+		SetAutoUpdateEnabled(enable);
 		ApplicationOutput("[C4D to Spout] Auto update @.", enable ? "on"_s : "off"_s);
 		return true;
 	}
 
 	Int32 GetState(BaseDocument* doc, GeDialog* parentManager) override
 	{
-		return CMD_ENABLED | (c2s::IsAutoUpdateEnabled() ? CMD_VALUE : 0);
+		return CMD_ENABLED | (IsAutoUpdateEnabled() ? CMD_VALUE : 0);
 	}
 };
 
 } // namespace
 
+maxon::Result<void> SendTestPattern()
+{
+	iferr_scope;
+	const Int32 w = TEST_PATTERN_WIDTH;
+	const Int32 h = TEST_PATTERN_WIDTH / 2;
+	maxon::BaseArray<UChar> rgba;
+	rgba.Resize(Int(w) * Int(h) * 4) iferr_return;
+	MakeTestPattern(rgba, w, h);
+	SendRGBA8(rgba.GetFirst(), w, h) iferr_return;
+	ApplicationOutput("[C4D to Spout] Sent @x@ test pattern as '@'.", w, h, GetSettings().senderName);
+	return maxon::OK;
+}
+
+} // namespace c2s
+
 Bool cinema::PluginStart()
 {
-	if (!RegisterCommandPlugin(ID_C2S_TEST_PATTERN, "C4D to Spout: Send Test Pattern"_s, 0, nullptr,
-				"Send a colour-coded 2:1 lat-long test pattern over Spout"_s, NewObjClear(TestPatternCommand)))
+	c2s::LoadSettings();
+
+	if (!RegisterCommandPlugin(c2s::ID_C2S_TEST_PATTERN, "C4D to Spout: Send Test Pattern"_s, 0, nullptr,
+				"Send a colour-coded 2:1 lat-long test pattern over Spout"_s, NewObjClear(c2s::TestPatternCommand)))
 		return false;
-	if (!RegisterCommandPlugin(ID_C2S_RENDER_NOW, "C4D to Spout: Render Now"_s, 0, nullptr,
-				"Render the scene camera with the Viewport Renderer and send it over Spout"_s, NewObjClear(RenderNowCommand)))
+	if (!RegisterCommandPlugin(c2s::ID_C2S_RENDER_NOW, "C4D to Spout: Render Now"_s, 0, nullptr,
+				"Render the scene camera and send it over Spout"_s, NewObjClear(c2s::RenderNowCommand)))
 		return false;
-	if (!RegisterCommandPlugin(ID_C2S_AUTO_UPDATE_TOGGLE, "C4D to Spout: Auto Update"_s, 0, nullptr,
-				"Re-render and send over Spout whenever the scene changes"_s, NewObjClear(AutoUpdateToggleCommand)))
+	if (!RegisterCommandPlugin(c2s::ID_C2S_AUTO_UPDATE_TOGGLE, "C4D to Spout: Auto Update"_s, 0, nullptr,
+				"Re-render and send over Spout whenever the scene changes"_s, NewObjClear(c2s::AutoUpdateToggleCommand)))
+		return false;
+	if (!c2s::RegisterDialogCommand())
 		return false;
 	if (!c2s::RegisterAutoUpdate())
 		return false;
-	ApplicationOutput("[C4D to Spout] Loaded.");
+	ApplicationOutput("[C4D to Spout] Loaded. Auto update is @.", c2s::GetSettings().enabled ? "on"_s : "off"_s);
 	return true;
 }
 

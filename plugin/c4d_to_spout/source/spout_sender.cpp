@@ -20,12 +20,13 @@ namespace
 {
 std::unique_ptr<spoutDX> g_sender;
 std::string g_name;
+bool g_halfFloat = false;
 }
 
-bool SpoutOpen(const char* senderName)
+bool SpoutOpen(const char* senderName, bool halfFloat)
 {
-	const std::string name = senderName ? senderName : "C4D_LatLong";
-	if (g_sender && g_name == name)
+	const std::string name = (senderName && *senderName) ? senderName : "C4D_LatLong";
+	if (g_sender && g_name == name && g_halfFloat == halfFloat)
 		return true;
 
 	SpoutClose();
@@ -34,20 +35,20 @@ bool SpoutOpen(const char* senderName)
 	if (!sender->OpenDirectX11())
 		return false;
 
-	// Display-referred 8-bit RGBA, matching the OCIO-baked render output.
-	sender->SetSenderFormat(DXGI_FORMAT_R8G8B8A8_UNORM);
+	sender->SetSenderFormat(halfFloat ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM);
 	sender->SetSenderName(name.c_str());
 
 	g_sender = std::move(sender);
 	g_name = name;
+	g_halfFloat = halfFloat;
 	return true;
 }
 
-bool SpoutSendRGBA8(const std::uint8_t* rgba, std::uint32_t width, std::uint32_t height)
+bool SpoutSend(const void* pixels, std::uint32_t width, std::uint32_t height, std::uint32_t pitch)
 {
-	if (!g_sender || !rgba || width == 0 || height == 0)
+	if (!g_sender || !pixels || width == 0 || height == 0)
 		return false;
-	return g_sender->SendImage(rgba, width, height, width * 4);
+	return g_sender->SendImage(static_cast<const unsigned char*>(pixels), width, height, pitch);
 }
 
 void SpoutClose()

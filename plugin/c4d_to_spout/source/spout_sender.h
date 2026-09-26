@@ -6,16 +6,18 @@
 // Thin wrapper around SpoutDX. The implementation is isolated in spout_sender.cpp so that
 // Windows/D3D headers never meet the Maxon headers in the same translation unit.
 //
-// SpoutDX is not thread-safe: all calls must come from the same thread (the main thread for now).
+// SpoutDX is not thread-safe: all calls must come from the same thread (the main thread).
 namespace c2s
 {
 
-// Opens the D3D11 device and names the sender. Safe to call repeatedly; re-opens only if the
-// name changed. Returns false if D3D11 could not be initialized.
-bool SpoutOpen(const char* senderName);
+// Opens the D3D11 device and names the sender. Re-opens only if the name or format changed.
+// #halfFloat selects R16G16B16A16_FLOAT, otherwise R8G8B8A8_UNORM.
+// Returns false if D3D11 could not be initialized.
+bool SpoutOpen(const char* senderName, bool halfFloat);
 
-// Sends a tightly packed RGBA8 image. The sender is (re)created to match width/height.
-bool SpoutSendRGBA8(const std::uint8_t* rgba, std::uint32_t width, std::uint32_t height);
+// Sends an image in the format given to SpoutOpen. #pitch is the row size in bytes.
+// The sender is (re)created to match width/height.
+bool SpoutSend(const void* pixels, std::uint32_t width, std::uint32_t height, std::uint32_t pitch);
 
 // Releases the sender and the D3D11 device.
 void SpoutClose();

@@ -86,8 +86,28 @@ over **Spout**. The user maps it onto sphere geometry in **UE5** for fast 360 re
     shutdown with it on leaves no crash report.
   - Not yet exercised: interactive drags, playback throttle feel, a concurrent Picture
     Viewer render.
-- [ ] Phase 4: dialog/persistence (enabled state resets to off each launch), Redshift
-  engine option, 16F output, status/errors.
+- [x] **Phase 4 (2026-09-26):** a dockable "C4D to Spout..." dialog (1000005, `dialog.cpp`)
+  with auto update, sender name, width (0 = render settings), engine (Viewport | render
+  settings' engine), output (8-bit display, the default | 16F linear, opt-in because it's
+  slower), debounce/throttle, Render Now, Test Pattern, and a status/warning line.
+  - Settings persist in world plugin data (key 1000005, `settings.cpp`), including the
+    enabled state.
+  - Warnings: no scene camera, camera not RS Spherical (RS camera 1057516, param 1001 == 14),
+    frame not 2:1.
+  - README.md documents build, install, use, receiving, troubleshooting.
+  - Deviation: no render-settings picker. It always uses the *active* render settings;
+    rendering a non-active one would need a doc clone or mutating the live doc. For
+    Redshift, make a Redshift render setting active and choose "Render settings engine".
+  - **Gotcha:** globals holding `maxon::String` (static init at DLL load) stop the module
+    from loading at all, silently. Use function-local statics.
+  - SpoutDX `ReadTexurePixels` assumes 4 bytes/pixel, so `spout_grab` does its own staging
+    readback (it handles RGBA16F).
+  - Verified: dialog Render Now; 16F sender (format 10) with correct linear content;
+    auto update and format persisting across a restart.
+  - Not verified: the Redshift engine through the plugin, timing 8-bit vs 16F.
+  - The user's saved settings were left at **16F output + auto update on** from testing.
+    Switch the output back to 8-bit in the dialog.
+- [ ] Phase 5: packaging (zip of .xdl64 + README), real plugin IDs, UE5 verification.
 
 ## User preferences
 Brief and concise, with no flattery. Disagree and propose alternatives when warranted. The
