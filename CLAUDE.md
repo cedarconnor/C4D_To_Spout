@@ -49,7 +49,26 @@ over **Spout**. The user maps it onto sphere geometry in **UE5** for fast 360 re
     output is black.
   - `preview_render` in the MCP bridge adds viewport HUD overlays; `RenderDocument` with
     the doc's RenderData does not.
-- [ ] Phase 2+: C++ plugin (see PLAN.md §4 and the repo layout in §5).
+- [x] **Phase 2 MVP C++ plugin (2026-09-26):** built with `build.ps1` (VS 2022 v143, Windows SDK
+  10.0.22621). It extracts the SDK from the C4D install's `sdk.zip` into the gitignored
+  `external/c4d_sdk_2026`, builds a static SpoutDX lib (`/MD`) from the pinned
+  `external/Spout2` submodule (2.007.017), and wires in our module via `plugin/custom_paths.txt`
+  (alias `C2S` = repo root). It's installed with a junction from the 2026 prefs `plugins`
+  folder to the build output. Two commands (dev IDs 1000001/1000002; **register real IDs
+  before release**):
+  - "Send Test Pattern": a colour-coded 2:1 grid.
+  - "Render Now": Viewport Renderer + `AUTO_SETUP|OCIO_BAKE_RENDERING` → RGBA8 → Spout
+    sender `C4D_LatLong` (`R8G8B8A8_UNORM`).
+  Both were verified with `build/spoutdx/bin/Release/spout_grab.exe`; outputs are in
+  `prototype/out/spout_*.png`. Everything runs on the main thread (SpoutDX is owned by it).
+  - Aspect comes from XRES:YRES, not `RDATA_FILMASPECT`: the film aspect can be stale
+    and stretch the output. The plugin writes a consistent film aspect and pixel aspect 1
+    into its settings copy.
+  - SpoutDX's CPU receive paths (`ReceiveImage`/`ReadTexurePixels`) are double-buffered
+    and return the previous frame. With send-on-change, a CPU receiver sees an empty frame
+    until a second send. GPU receivers (UE) are unaffected.
+- [ ] Phase 2 remaining: verify on the UE5 sphere (seam, U direction, colour).
+- [ ] Phase 3+: auto-update on change (PLAN.md §4).
 
 ## User preferences
 Brief and concise, with no flattery. Disagree and propose alternatives when warranted. The

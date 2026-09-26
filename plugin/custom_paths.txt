@@ -1,0 +1,7 @@
+# Custom paths file for the Cinema 4D SDK (passed as MAXON_SDK_CUSTOM_PATHS_FILE by build.ps1).
+# Relative paths resolve against the SDK root (external/c4d_sdk_2026).
+
+# Repo root, used as $(C2S) in projectdefinition.txt.
+ALIAS C2S ../..
+
+MODULE ../../plugin/c4d_to_spout

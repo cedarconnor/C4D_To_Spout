@@ -1,0 +1,5 @@
+
+# Build outputs and extracted SDK
+build/
+external/c4d_sdk_2026/
+

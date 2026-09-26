@@ -1,0 +1,21 @@
+// C4D to Spout: sends the active camera as a fixed-size 2:1 lat-long image over Spout.
+Platform=windows
+
+Type=DLL
+
+APIS=\
+cinema.framework;\
+core.framework
+
+C4D=true
+
+ModuleId=com.cedarconnor.c4d_to_spout
+
+// Spout headers and the prebuilt static SpoutDX lib (built by build.ps1 into build/spoutdx).
+AdditionalIncludeDirectories=\
+$(C2S)/external/Spout2/SPOUTSDK/SpoutDirectX/SpoutDX;\
+$(C2S)/external/Spout2/SPOUTSDK/SpoutGL
+
+AdditionalDependencies=d3d11.lib;dxgi.lib
+AdditionalDependencies.DEBUG=$(C2S)/build/spoutdx/lib/Debug/spoutdx_c4d.lib
+AdditionalDependencies.RELEASE=$(C2S)/build/spoutdx/lib/Release/spoutdx_c4d.lib
