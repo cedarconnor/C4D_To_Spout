@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "SpoutDX.h"
@@ -73,7 +74,8 @@ static bool ReadTexture(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Te
 	return ok;
 }
 
-static bool WriteBmp(const char* path, const unsigned char* rgba, unsigned w, unsigned h)
+// #bgra: the pixels are already in BMP byte order (a B8G8R8A8 sender, e.g. SpoutGL).
+static bool WriteBmp(const char* path, const unsigned char* rgba, unsigned w, unsigned h, bool bgra)
 {
 	FILE* f = std::fopen(path, "wb");
 	if (!f)
@@ -93,15 +95,13 @@ static bool WriteBmp(const char* path, const unsigned char* rgba, unsigned w, un
 	ih.biSizeImage = imageSize;
 	std::fwrite(&fh, sizeof(fh), 1, f);
 	std::fwrite(&ih, sizeof(ih), 1, f);
-	std::vector<unsigned char> bgra(imageSize);
-	for (unsigned i = 0; i < w * h; ++i)
+	std::vector<unsigned char> out(rgba, rgba + imageSize);
+	if (!bgra)
 	{
-		bgra[i * 4 + 0] = rgba[i * 4 + 2];
-		bgra[i * 4 + 1] = rgba[i * 4 + 1];
-		bgra[i * 4 + 2] = rgba[i * 4 + 0];
-		bgra[i * 4 + 3] = rgba[i * 4 + 3];
+		for (unsigned i = 0; i < w * h; ++i)
+			std::swap(out[i * 4 + 0], out[i * 4 + 2]);
 	}
-	std::fwrite(bgra.data(), 1, bgra.size(), f);
+	std::fwrite(out.data(), 1, out.size(), f);
 	std::fclose(f);
 	return true;
 }
@@ -139,7 +139,8 @@ int main(int argc, char** argv)
 				if (ReadTexture(receiver.GetDX11Device(), receiver.GetDX11Context(), tex, raw.data(), halfFloat ? 8 : 4))
 				{
 					std::vector<unsigned char> pixels = halfFloat ? HalfLinearToSrgb8(raw, w, h) : raw;
-					if (!WriteBmp(out.c_str(), pixels.data(), w, h))
+					const bool bgra = receiver.GetSenderFormat() == DXGI_FORMAT_B8G8R8A8_UNORM;
+						if (!WriteBmp(out.c_str(), pixels.data(), w, h, bgra))
 						return 3;
 					std::printf("Received '%s' %ux%u format=%d frame=%ld -> %s\n", name.c_str(), w, h,
 						int(receiver.GetSenderFormat()), receiver.GetSenderFrame(), out.c_str());

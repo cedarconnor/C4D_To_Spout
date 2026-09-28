@@ -165,6 +165,41 @@ PLAN.md                          research and design notes
   <https://developers.maxon.net/forum/pid> before distributing builds.
 - Rendering and sending run on Cinema 4D's main thread.
 
+## Blender add-on (LatLong Spout)
+
+`blender/latlong_spout/` is a Blender 4.2+ extension that does the same job from Blender's
+viewport: the active camera goes out as a 2:1 lat-long image over Spout (default sender
+`Blender_LatLong`), with the same orientation as the C4D plugin. Blender's viewport cannot
+draw a panoramic camera outside Cycles, so the add-on draws six 90° cube faces from the camera
+position with `GPUOffScreen.draw_view3d` and unwraps them on the GPU. The image uses whatever
+the largest 3D view shows: Solid, Material Preview or EEVEE Rendered. Cycles Rendered is
+not supported.
+
+**Build / install:** `blender\build.ps1` downloads the SpoutGL wheels and writes
+`blender/dist/latlong_spout-<version>.zip`. Install that through *Preferences → Get Extensions →
+Install from Disk*. For development, junction `blender/latlong_spout` into
+`%APPDATA%\Blender Foundation\Blender\<ver>\extensions\user_default\` after downloading the
+wheels. Blender installs them when the extension is enabled.
+
+**Use:** open the 3D view sidebar (N) → *Spout* tab. *Auto Update* sends on scene, frame,
+camera or view-shading changes, up to *Max FPS*; the refresh button sends once. *Width* sets
+the output (the height is half). *Face Scale* and *AA Samples* control supersampling.
+
+- In Solid mode, enable *World Space Lighting* (Viewport Shading popover). Otherwise the
+  studio light follows each face and its brightness steps at the face edges. MatCap
+  cannot work for the same reason.
+- Only the camera's position and rotation are used. Its lens, sensor and shift are ignored.
+- Cost per changed frame on the test scene (RTX A6000, 2048×1024, face scale 2): Solid about
+  25 ms; EEVEE Rendered about 210 ms (about 100 ms with shadows off, about 340 ms with
+  screen-space raytracing); Material Preview about 280 ms. EEVEE has a fixed cost per face, so
+  Solid gives a live 360 preview and EEVEE gives a few fps.
+- SpoutGL sends a `B8G8R8A8_UNORM` texture (the C4D plugin sends `R8G8B8A8_UNORM`). GPU
+  receivers handle both.
+
+```powershell
+.\build\spoutdx\bin\Release\spout_grab.exe Blender_LatLong out.bmp 5000
+```
+
 ## Licenses
 
 Spout 2 is © Lynn Jarvis and contributors, BSD-2-Clause (see `external/Spout2/LICENSE`).

@@ -1,0 +1,25 @@
+schema_version = "1.0.0"
+
+id = "latlong_spout"
+version = "0.1.0"
+name = "LatLong Spout"
+tagline = "Send the active camera as a 360 lat-long image over Spout"
+maintainer = "Cedar Connor"
+type = "add-on"
+
+tags = ["3D View", "Camera", "Render"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+platforms = ["windows-x64"]
+
+# Downloaded by blender/build.ps1 (not checked in).
+wheels = [
+  "./wheels/spoutgl-0.1.1-cp311-cp311-win_amd64.whl",
+  "./wheels/spoutgl-0.1.1-cp313-cp313-win_amd64.whl",
+]
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "/.git/", "*.zip"]

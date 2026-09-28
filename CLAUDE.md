@@ -109,6 +109,28 @@ over **Spout**. The user maps it onto sphere geometry in **UE5** for fast 360 re
     Switch the output back to 8-bit in the dialog.
 - [ ] Phase 5: packaging (zip of .xdl64 + README), real plugin IDs, UE5 verification.
 
+## Blender port (`blender/latlong_spout`, 2026-09-28)
+- The user wants **viewport drawing only, not Cycles** (a path tracer is too slow). Method: 6×
+  `GPUOffScreen.draw_view3d` 90° cube faces from the scene camera, drawn inside a SpaceView3D
+  POST_PIXEL handler (it needs a draw context), plus a GPU unwrap shader with an n×n
+  supersample grid → numpy → SpoutGL `sendImage` on its own thread with its own GL context
+  (`createOpenGL`). The shading follows the largest 3D view.
+- Verified in Blender 5.2.1 (OpenGL, A6000) with `spout_grab`: correct orientation (same as
+  C4D) and colour, no seams (including EEVEE shadows and SSR), and auto update sends on
+  move/frame/shading change but not on selection or when idle.
+- Per changed frame at 2K: Solid ~25 ms; EEVEE ~210 ms (100 without shadows); Material Preview
+  ~280 ms. Numbers measured with an unchanged scene (~15 ms) are cached and misleading.
+- Projection-jitter AA in EEVEE costs ~45 ms per draw (per-view reset), so use the
+  supersampled unwrap instead.
+- Solid needs World Space Lighting (the studio light follows the view → steps at face
+  edges).
+- SpoutGL sends B8G8R8A8 (format 87). `spout_grab` now handles BGRA.
+- Dev install: a junction into `%APPDATA%\...\5.2\extensions\user_default\latlong_spout`.
+  `blender/build.ps1` downloads the wheels and builds the zip.
+- The Claude app's environment still has a stale `OCIO` (ACES 1.2) variable, so Blender
+  launched from here uses ACES. The machine and user env are clean.
+- Not yet done: UE5 check, Vulkan backend, heavy real scenes.
+
 ## User preferences
 Brief and concise, with no flattery. Disagree and propose alternatives when warranted. The
 user knows C4D well, so trust their observations about C4D behaviour over assumptions.

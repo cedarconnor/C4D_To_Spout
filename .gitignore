@@ -3,3 +3,9 @@
 build/
 external/c4d_sdk_2026/
 
+
+# Blender add-on: downloaded wheels and built zips
+blender/latlong_spout/wheels/
+blender/dist/
+__pycache__/
+prototype/out/**/*.bmp
